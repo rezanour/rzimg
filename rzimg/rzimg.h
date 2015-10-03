@@ -1,15 +1,11 @@
 #ifndef _RZIMG_H_
 #define _RZIMG_H_
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
-
-//=============================================================================
-// common headers
-//=============================================================================
-
-#include <stdint.h>
 
 //=============================================================================
 // types
@@ -27,9 +23,8 @@ typedef enum
     rz_fail             = -1,
     rz_invalid_param    = -2,
     rz_out_of_memory    = -3,
-    rz_file_not_found   = -4,
-    rz_access_denied    = -5,
-    rz_invalid_file     = -6,
+    rz_invalid_file     = -4,
+    rz_file_not_found   = -5,
 } rz_result;
 
 // Formats are specified in little endian order. For example, rgba means the

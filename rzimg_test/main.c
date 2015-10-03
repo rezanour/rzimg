@@ -2,6 +2,7 @@
 #include <malloc.h>
 #include <rzimg.h>
 
+#ifdef _WIN32
 #include <Windows.h>
 void show_image(int width, int height, rz_format format, const uint8_t* pixels)
 {
@@ -67,6 +68,9 @@ void show_image(int width, int height, rz_format format, const uint8_t* pixels)
         DestroyWindow(hwnd);
     }
 }
+#else
+void show_image(int width, int height, rz_format format, const uint8_t* pixels);
+#endif
 
 int main(int argc, char* args[])
 {

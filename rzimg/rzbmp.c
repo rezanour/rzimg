@@ -2,13 +2,18 @@
 #include <errno.h>
 #include <malloc.h>
 #include <assert.h>
+#include <emmintrin.h>
+#include <tmmintrin.h>
 #include "rzimg.h"
+#include "internal/rzdebug.h"
+
+static const uint16_t BMP_SIGNATURE = 0x4D42;
 
 #pragma pack(push, 1)
 
 typedef struct
 {
-    uint16_t signature;    // 0x4D42 for BMP
+    uint16_t signature;
     uint32_t file_size;
     uint32_t unused;
     uint32_t data_offset;
@@ -43,85 +48,55 @@ rz_result rz_load_bmp(const char* filename, rz_format format,
     uint8_t* src = NULL;
     uint32_t* dst = NULL;
     int i;
+    size_t items_read;
 
-    // if pixels or pixels_size is null, return error
-    if (!pixels || !width || !height)
-    {
-        result = rz_invalid_param;
-        goto cleanup;
-    }
+    // validate output pointers
+    CHECK_ERROR(
+        (pixels && width && height),
+        rz_invalid_param, "Output pointers invalid.\n");
 
     // init out params
     *pixels = NULL;
     *width = *height = 0;
 
     // currently only support rgba & bgra
-    if (format != rz_format_rgba32 && format != rz_format_bgra32)
-    {
-        result = rz_invalid_param;
-        goto cleanup;
-    }
+    CHECK_ERROR(
+        (format == rz_format_rgba32 || format == rz_format_bgra32),
+        rz_invalid_param, "Specified format is not supported.\n");
 
     // open the file and try reading base bmp header
     err = fopen_s(&file, filename, "rb");
-    if (err)
-    {
-        result = (err == ENOENT) ? rz_file_not_found : rz_fail;
-        goto cleanup;
-    }
+    CHECK_ERROR(err == 0, (err == ENOENT ? rz_file_not_found : rz_fail),
+        "Error opening file.\n");
 
-    if (fread(&bmp_header, sizeof(bmp_header_t), 1, file) != 1)
-    {
-        result = rz_invalid_file;
-        goto cleanup;
-    }
+    items_read = fread(&bmp_header, sizeof(bmp_header_t), 1, file);
+    CHECK_ERROR(items_read == 1, rz_invalid_file, "Failed reading bmp header.\n");
 
     // verify it's a bmp
-    if (bmp_header.signature != 0x4D42)
-    {
-        result = rz_invalid_file;
-        goto cleanup;
-    }
+    CHECK_ERROR(bmp_header.signature == BMP_SIGNATURE, rz_invalid_file,
+        "File doens't appear to be bmp.\n");
 
     // allocate buffer to hold file contents
     data = (uint8_t*)malloc(bmp_header.file_size);
-    if (!data)
-    {
-        result = rz_out_of_memory;
-        goto cleanup;
-    }
+    CHECK_ERROR(data != 0, rz_out_of_memory, "Failed allocating buffer.\n");
 
     // read in the rest of the file into memory
-    if (fread(data, bmp_header.file_size - sizeof(bmp_header_t), 1, file) != 1)
-    {
-        result = rz_invalid_file;
-        goto cleanup;
-    }
+    items_read = fread(data, bmp_header.file_size - sizeof(bmp_header_t), 1, file);
+    CHECK_ERROR(items_read == 1, rz_invalid_file, "File appears truncated.\n");
 
     // get dib header (right after the bmp header)
     dib_header = (dib_header_t*)data;
 
     // ensure it's dib (header size should be 40)
-    if (dib_header->header_size != 40)
-    {
-        result = rz_invalid_file;
-        goto cleanup;
-    }
+    CHECK_ERROR(dib_header->header_size == 40, rz_invalid_file, "Invalid dib header.\n");
 
     // currently only support uncompressed 24bpp BMP
-    if (dib_header->compression != 0 || dib_header->bpp != 24)
-    {
-        result = rz_fail;
-        goto cleanup;
-    }
+    CHECK_ERROR((dib_header->compression == 0 && dib_header->bpp == 24),
+        rz_fail, "Only uncompressed 24bpp bmp supported currently.\n");
 
     // allocate pixel buffer
     *pixels = (uint8_t*)malloc(dib_header->width * dib_header->height * sizeof(uint32_t));
-    if (!(*pixels))
-    {
-        result = rz_out_of_memory;
-        goto cleanup;
-    }
+    CHECK_ERROR((*pixels), rz_out_of_memory, "Failed allocating pixel buffer.\n");
 
     *width = dib_header->width;
     *height = dib_header->height;
@@ -130,26 +105,29 @@ rz_result rz_load_bmp(const char* filename, rz_format format,
     src = (uint8_t*)(data + bmp_header.data_offset - sizeof(bmp_header_t));
     dst = (uint32_t*)(*pixels);
 
-    // read pixels
-    for (i = 0; i < dib_header->width * dib_header->height * 3; i += 3) // * 3 for size since 24bpp
+    // prep masks
+    __m128i alpha = _mm_set_epi8(0xFF, 0, 0, 0, 0xFF, 0, 0, 0, 0xFF, 0, 0, 0, 0xFF, 0, 0, 0);
+    __m128i mask;
+    switch (format)
     {
-        switch (format)
-        {
-        case rz_format_bgra32:
-            *dst = 0xFF000000 |
-                ((uint32_t)src[i + 2] << 16) |
-                ((uint32_t)src[i + 1] << 8) |
-                (uint32_t)src[i];
-            break;
+    case rz_format_bgra32:
+        mask = _mm_set_epi8(0x80, 11, 10, 9, 0x80, 8, 7, 6, 0x80, 5, 4, 3, 0x80, 2, 1, 0);
+        break;
 
-        case rz_format_rgba32:
-            *dst = 0xFF000000 |
-                ((uint32_t)src[i] << 16) |
-                ((uint32_t)src[i + 1] << 8) |
-                (uint32_t)src[i + 2];
-            break;
-        }
-        ++dst;
+    default:
+        assert(0);
+        __fallthrough;
+    case rz_format_rgba32:
+        mask = _mm_set_epi8(0x80, 9, 10, 11, 0x80, 6, 7, 8, 0x80, 3, 4, 5, 0x80, 0, 1, 2);
+        break;
+    }
+
+    // stream 4 pixels at a time
+    for (i = 0; i < dib_header->width * dib_header->height; i += 4)
+    {
+        __m128i block = _mm_loadu_si128((const __m128i*)&src[i * 3]);
+        __m128i expanded = _mm_shuffle_epi8(block, mask);
+        _mm_storeu_si128((__m128i*)&dst[i], _mm_or_si128(expanded, alpha));
     }
 
 cleanup:
